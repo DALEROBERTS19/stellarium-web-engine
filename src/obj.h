@@ -265,21 +265,22 @@ struct attribute {
  * Function: obj_create
  * Create a new object.
  *
+ * If we pass a parent argument, the new object is added to the parent,
+ * and the only ownership is the parent, so we don't have to call
+ * obj_release.  Otherwise we have to call obj_release.
+ *
  * Properties:
  *   type   - The type of the object (must have been registered).
  *   id     - Unique id to give the object.
- *   parent - The new object is added to the parent.
  *   args   -  Attributes to set.
  */
-obj_t *obj_create(const char *type, const char *id, obj_t *parent,
-                  json_value *args);
+obj_t *obj_create(const char *type, const char *id, json_value *args);
 
 /*
  * Function: obj_create
  * Same as obj_create but the json arguments are passed as a string.
  */
-obj_t *obj_create_str(const char *type, const char *id, obj_t *parent,
-                      const char *args);
+obj_t *obj_create_str(const char *type, const char *id, const char *args);
 
 /*
  * Function: obj_release

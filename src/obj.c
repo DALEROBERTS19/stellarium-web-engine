@@ -27,8 +27,7 @@ typedef struct {
 // Global list of all the registered klasses.
 static obj_klass_t *g_klasses = NULL;
 
-static obj_t *obj_create_(obj_klass_t *klass, const char *id, obj_t *parent,
-                          json_value *args)
+static obj_t *obj_create_(obj_klass_t *klass, const char *id, json_value *args)
 {
     const char *attr;
     int i;
@@ -39,12 +38,10 @@ static obj_t *obj_create_(obj_klass_t *klass, const char *id, obj_t *parent,
     if (id) obj->id = strdup(id);
     obj->ref = 1;
     obj->klass = klass;
-    if (parent) module_add(parent, obj);
+
     if (obj->klass->init) {
         if (obj->klass->init(obj, args) != 0) {
-            // XXX: should be done by obj_release!
-            if (parent) module_remove(parent, obj);
-            obj_release(obj);
+            free(obj);
             return NULL;
         }
     }
@@ -62,8 +59,7 @@ static obj_t *obj_create_(obj_klass_t *klass, const char *id, obj_t *parent,
     return obj;
 }
 
-obj_t *obj_create(const char *type, const char *id, obj_t *parent,
-                  json_value *args)
+obj_t *obj_create(const char *type, const char *id, json_value *args)
 {
     obj_t *obj;
     obj_klass_t *klass;
@@ -73,21 +69,20 @@ obj_t *obj_create(const char *type, const char *id, obj_t *parent,
         if (klass->model && strcmp(klass->model, type) == 0) break;
     }
     assert(klass);
-    obj = obj_create_(klass, id, parent, args);
+    obj = obj_create_(klass, id, args);
     return obj;
 }
 
 // Same as obj_create but the json arguments are passes the json arguments
 // as a string.
 EMSCRIPTEN_KEEPALIVE
-obj_t *obj_create_str(const char *type, const char *id, obj_t *parent,
-                      const char *args)
+obj_t *obj_create_str(const char *type, const char *id, const char *args)
 {
     obj_t *ret;
     json_value *jargs;
     json_settings settings = {.value_extra = json_builder_extra};
     jargs = args ? json_parse_ex(&settings, args, strlen(args), NULL) : NULL;
-    ret = obj_create(type, id, parent, jargs);
+    ret = obj_create(type, id, jargs);
     json_value_free(jargs);
     return ret;
 }
@@ -99,6 +94,11 @@ void obj_release(obj_t *obj)
     assert(obj->ref);
     obj->ref--;
     if (obj->ref == 0) {
+        if (obj->parent) {
+            LOG_E("Trying to delete an object still owned by a parent!");
+            LOG_E("id: %s, klass: %s", obj->id, obj->klass->id);
+        }
+        assert(!obj->parent);
         if (obj->klass->del) obj->klass->del(obj);
         free(obj->id);
         free(obj);

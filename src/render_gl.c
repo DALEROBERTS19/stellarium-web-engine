@@ -65,7 +65,6 @@ enum {
     ITEM_LINES = 1,
     ITEM_MESH,
     ITEM_POINTS,
-    ITEM_ALPHA_TEXTURE,
     ITEM_TEXTURE,
     ITEM_ATMOSPHERE,
     ITEM_FOG,
@@ -93,8 +92,9 @@ struct item
     union {
         struct {
             float width;
-            float stripes;
             float glow;
+            float dash_length;
+            float dash_ratio;
         } lines;
 
         struct {
@@ -680,7 +680,7 @@ static void quad_wireframe(renderer_t          *rend_,
 
 static void texture2(renderer_gl_t *rend, texture_t *tex,
                      double uv[4][2], double pos[4][2],
-                     const double color_[4], bool swap_indices)
+                     const double color_[4], int flags, bool swap_indices)
 {
     int i, ofs;
     item_t *item;
@@ -688,12 +688,13 @@ static void texture2(renderer_gl_t *rend, texture_t *tex,
     float color[4];
 
     vec4_to_float(color_, color);
-    item = get_item(rend, ITEM_ALPHA_TEXTURE, 4, 6, tex);
+    item = get_item(rend, ITEM_TEXTURE, 4, 6, tex);
     if (item && memcmp(item->color, color, sizeof(color))) item = NULL;
 
     if (!item) {
         item = calloc(1, sizeof(*item));
-        item->type = ITEM_ALPHA_TEXTURE;
+        item->type = ITEM_TEXTURE;
+        item->flags = flags;
         gl_buf_alloc(&item->buf, &TEXTURE_BUF, 64 * 4);
         gl_buf_alloc(&item->indices, &INDICES_BUF, 64 * 6);
         item->tex = tex;
@@ -740,7 +741,7 @@ static void texture(renderer_t *rend_,
         verts[i][1] = pos[1] + verts[i][1];
         window_to_ndc(rend, verts[i], verts[i]);
     }
-    texture2(rend, tex, uv, verts, color, false);
+    texture2(rend, tex, uv, verts, color, 0, false);
 }
 
 // Render text using a system bakend generated texture.
@@ -818,7 +819,9 @@ static void text_using_texture(renderer_gl_t *rend,
         window_to_ndc(rend, verts[i], verts[i]);
     }
 
-    texture2(rend, tex, uv, verts, color, rend->cull_flipped);
+    texture2(rend, tex, uv, verts, color,
+             (effects & TEXT_BLEND_ADD) ? PAINTER_ADD : 0,
+             rend->cull_flipped);
 }
 
 // Render text using nanovg.
@@ -918,12 +921,34 @@ static void item_points_render(renderer_gl_t *rend, const item_t *item)
     GL(glDeleteBuffers(1, &array_buffer));
 }
 
-static void item_lines_render(renderer_gl_t *rend, const item_t *item)
+static void draw_buffer(const gl_buf_t *buf, const gl_buf_t *indices,
+                        GLuint gl_mode)
 {
-    gl_shader_t *shader;
     GLuint  array_buffer;
     GLuint  index_buffer;
 
+    GL(glGenBuffers(1, &index_buffer));
+    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
+    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                    indices->nb * indices->info->size,
+                    indices->data, GL_DYNAMIC_DRAW));
+
+    GL(glGenBuffers(1, &array_buffer));
+    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
+    GL(glBufferData(GL_ARRAY_BUFFER, buf->nb * buf->info->size,
+                    buf->data, GL_DYNAMIC_DRAW));
+
+    gl_buf_enable(buf);
+    GL(glDrawElements(gl_mode, indices->nb, GL_UNSIGNED_SHORT, 0));
+    gl_buf_disable(buf);
+
+    GL(glDeleteBuffers(1, &array_buffer));
+    GL(glDeleteBuffers(1, &index_buffer));
+}
+
+static void item_lines_render(renderer_gl_t *rend, const item_t *item)
+{
+    gl_shader_t *shader;
     shader = shader_get("blit", NULL, ATTR_NAMES, init_shader);
     GL(glUseProgram(shader->prog));
 
@@ -937,33 +962,13 @@ static void item_lines_render(renderer_gl_t *rend, const item_t *item)
                            GL_ZERO, GL_ONE));
     GL(glDisable(GL_DEPTH_TEST));
 
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
-    gl_update_uniform(shader, "u_color", item->color);
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_LINES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, GL_LINES);
 }
 
 static void item_mesh_render(renderer_gl_t *rend, const item_t *item)
 {
     // XXX: almost the same as item_lines_render.
     gl_shader_t *shader;
-    GLuint  array_buffer;
-    GLuint  index_buffer;
     int gl_mode;
     float fbo_size[2] = {rend->fb_size[0] / rend->scale,
                          rend->fb_size[1] / rend->scale};
@@ -993,68 +998,39 @@ static void item_mesh_render(renderer_gl_t *rend, const item_t *item)
                                GL_ZERO, GL_ONE));
     }
 
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
     gl_update_uniform(shader, "u_color", item->color);
     gl_update_uniform(shader, "u_fbo_size", fbo_size);
     gl_update_uniform(shader, "u_proj_scaling", item->mesh.proj_scaling);
 
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(gl_mode, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, gl_mode);
 }
 
 // XXX: almost the same as item_mesh_render!
 static void item_lines_glow_render(renderer_gl_t *rend, const item_t *item)
 {
     gl_shader_t *shader;
-    GLuint  array_buffer;
-    GLuint  index_buffer;
     float win_size[2] = {rend->fb_size[0] / rend->scale,
                          rend->fb_size[1] / rend->scale};
-
-    shader = shader_get("lines", NULL, ATTR_NAMES, init_shader);
+    shader_define_t defines[] = {
+        {"DASH", item->lines.dash_length && (item->lines.dash_ratio < 1.0)},
+        {}
+    };
+    shader = shader_get("lines", defines, ATTR_NAMES, init_shader);
     GL(glUseProgram(shader->prog));
 
     GL(glDisable(GL_DEPTH_TEST));
     GL(glEnable(GL_BLEND));
     GL(glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                            GL_ZERO, GL_ONE));
-
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
     gl_update_uniform(shader, "u_line_width", item->lines.width);
     gl_update_uniform(shader, "u_line_glow", item->lines.glow);
     gl_update_uniform(shader, "u_color", item->color);
     gl_update_uniform(shader, "u_win_size", win_size);
 
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_TRIANGLES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
+    gl_update_uniform(shader, "u_dash_length", item->lines.dash_length);
+    gl_update_uniform(shader, "u_dash_ratio", item->lines.dash_ratio);
 
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, GL_TRIANGLES);
 }
 
 static void item_vg_render(renderer_gl_t *rend, const item_t *item)
@@ -1106,6 +1082,8 @@ static void item_text_render(renderer_gl_t *rend, const item_t *item)
     nvgBeginFrame(rend->vg, rend->fb_size[0] / rend->scale,
                             rend->fb_size[1] / rend->scale, rend->scale);
     nvgSave(rend->vg);
+    if (item->text.effects & TEXT_BLEND_ADD)
+        nvgGlobalCompositeBlendFunc(rend->vg, NVG_ONE, NVG_ONE);
     nvgTranslate(rend->vg, item->text.pos[0], item->text.pos[1]);
     nvgRotate(rend->vg, item->text.angle);
     if (item->text.effects & TEXT_BOLD) {
@@ -1139,24 +1117,27 @@ static void item_text_render(renderer_gl_t *rend, const item_t *item)
     nvgEndFrame(rend->vg);
 }
 
-static void item_alpha_texture_render(renderer_gl_t *rend, const item_t *item)
+static void item_fog_render(renderer_gl_t *rend, const item_t *item)
 {
     gl_shader_t *shader;
-    GLuint  array_buffer;
-    GLuint  index_buffer;
+    shader = shader_get("fog", NULL, ATTR_NAMES, init_shader);
+    GL(glUseProgram(shader->prog));
+    GL(glEnable(GL_CULL_FACE));
+    GL(glCullFace(rend->cull_flipped ? GL_FRONT : GL_BACK));
+    GL(glEnable(GL_BLEND));
+    GL(glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                           GL_ZERO, GL_ONE));
+    GL(glDisable(GL_DEPTH_TEST));
+    draw_buffer(&item->buf, &item->indices, GL_TRIANGLES);
+    GL(glCullFace(GL_BACK));
+}
 
-    switch (item->type) {
-    case ITEM_FOG:
-        shader = shader_get("fog", NULL, ATTR_NAMES, init_shader);
-        break;
-    case ITEM_ALPHA_TEXTURE:
-        shader = shader_get("blit_tag", NULL, ATTR_NAMES, init_shader);
-        break;
-    default:
-        assert(false);
-        return;
-    }
+static void item_atmosphere_render(renderer_gl_t *rend, const item_t *item)
+{
+    gl_shader_t *shader;
+    float tm[3];
 
+    shader = shader_get("atmosphere", NULL, ATTR_NAMES, init_shader);
     GL(glUseProgram(shader->prog));
 
     GL(glActiveTexture(GL_TEXTURE0));
@@ -1165,50 +1146,38 @@ static void item_alpha_texture_render(renderer_gl_t *rend, const item_t *item)
     GL(glCullFace(rend->cull_flipped ? GL_FRONT : GL_BACK));
 
     GL(glEnable(GL_BLEND));
-    GL(glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
-                           GL_ZERO, GL_ONE));
-    GL(glDisable(GL_DEPTH_TEST));
-
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
+    if (color_is_white(item->color)) {
+        GL(glBlendFunc(GL_ONE, GL_ONE));
+    } else {
+        GL(glBlendFunc(GL_CONSTANT_COLOR, GL_ONE));
+        GL(glBlendColor(item->color[0] * item->color[3],
+                        item->color[1] * item->color[3],
+                        item->color[2] * item->color[3],
+                        item->color[3]));
+    }
 
     gl_update_uniform(shader, "u_color", item->color);
-
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_TRIANGLES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    gl_update_uniform(shader, "u_atm_p", item->atm.p);
+    gl_update_uniform(shader, "u_sun", item->atm.sun);
+    // XXX: the tonemapping args should be copied before rendering!
+    tm[0] = core->tonemapper.p;
+    tm[1] = core->tonemapper.lwmax;
+    tm[2] = core->tonemapper.exposure;
+    gl_update_uniform(shader, "u_tm", tm);
+    draw_buffer(&item->buf, &item->indices, GL_TRIANGLES);
     GL(glCullFace(GL_BACK));
 }
 
 static void item_texture_render(renderer_gl_t *rend, const item_t *item)
 {
     gl_shader_t *shader;
-    GLuint  array_buffer;
-    GLuint  index_buffer;
-    float tm[3];
 
-    switch (item->type) {
-    case ITEM_ATMOSPHERE:
-        shader = shader_get("atmosphere", NULL, ATTR_NAMES, init_shader);
-        break;
-    case ITEM_TEXTURE:
-        shader = shader_get("blit", NULL, ATTR_NAMES, init_shader);
-        break;
-    default:
-        assert(false);
-        return;
-    }
+    shader_define_t defines[] = {
+        {"TEXTURE_LUMINANCE", item->tex->format == GL_LUMINANCE &&
+                              !(item->flags & PAINTER_ADD)},
+        {}
+    };
+    shader = shader_get("blit", defines, ATTR_NAMES, init_shader);
 
     GL(glUseProgram(shader->prog));
 
@@ -1240,40 +1209,12 @@ static void item_texture_render(renderer_gl_t *rend, const item_t *item)
     }
 
     gl_update_uniform(shader, "u_color", item->color);
-    if (item->type == ITEM_ATMOSPHERE) {
-        gl_update_uniform(shader, "u_atm_p", item->atm.p);
-        gl_update_uniform(shader, "u_sun", item->atm.sun);
-        // XXX: the tonemapping args should be copied before rendering!
-        tm[0] = core->tonemapper.p;
-        tm[1] = core->tonemapper.lwmax;
-        tm[2] = core->tonemapper.exposure;
-        gl_update_uniform(shader, "u_tm", tm);
-    }
-
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_TRIANGLES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, GL_TRIANGLES);
     GL(glCullFace(GL_BACK));
 }
 
 static void item_quad_wireframe_render(renderer_gl_t *rend, const item_t *item)
 {
-    GLuint  array_buffer;
-    GLuint  index_buffer;
     gl_shader_t *shader;
 
     shader = shader_get("blit", NULL, ATTR_NAMES, init_shader);
@@ -1287,30 +1228,12 @@ static void item_quad_wireframe_render(renderer_gl_t *rend, const item_t *item)
     GL(glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                            GL_ZERO, GL_ONE));
 
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_LINES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, GL_LINES);
 }
 
 static void item_planet_render(renderer_gl_t *rend, const item_t *item)
 {
     gl_shader_t *shader;
-    GLuint  array_buffer;
-    GLuint  index_buffer;
     bool is_moon;
     const float depth_range[] = {rend->depth_range[0], rend->depth_range[1]};
     shader_define_t defines[] = {
@@ -1359,17 +1282,6 @@ static void item_planet_render(renderer_gl_t *rend, const item_t *item)
     else
         GL(glDisable(GL_DEPTH_TEST));
 
-    GL(glGenBuffers(1, &index_buffer));
-    GL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer));
-    GL(glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                    item->indices.nb * item->indices.info->size,
-                    item->indices.data, GL_DYNAMIC_DRAW));
-
-    GL(glGenBuffers(1, &array_buffer));
-    GL(glBindBuffer(GL_ARRAY_BUFFER, array_buffer));
-    GL(glBufferData(GL_ARRAY_BUFFER, item->buf.nb * item->buf.info->size,
-                    item->buf.data, GL_DYNAMIC_DRAW));
-
     // Set all uniforms.
     is_moon = item->flags & PAINTER_IS_MOON;
     gl_update_uniform(shader, "u_color", item->color);
@@ -1387,12 +1299,7 @@ static void item_planet_render(renderer_gl_t *rend, const item_t *item)
                       item->planet.normal_tex_transf);
     gl_update_uniform(shader, "u_depth_range", depth_range);
 
-    gl_buf_enable(&item->buf);
-    GL(glDrawElements(GL_TRIANGLES, item->indices.nb, GL_UNSIGNED_SHORT, 0));
-    gl_buf_disable(&item->buf);
-
-    GL(glDeleteBuffers(1, &array_buffer));
-    GL(glDeleteBuffers(1, &index_buffer));
+    draw_buffer(&item->buf, &item->indices, GL_TRIANGLES);
     GL(glCullFace(GL_BACK));
 }
 
@@ -1427,21 +1334,46 @@ static void rend_flush(renderer_gl_t *rend)
 #endif
 
     DL_FOREACH_SAFE(rend->items, item, tmp) {
-        if (item->type == ITEM_LINES) item_lines_render(rend, item);
-        if (item->type == ITEM_LINES_GLOW) item_lines_glow_render(rend, item);
-        if (item->type == ITEM_MESH) item_mesh_render(rend, item);
-        if (item->type == ITEM_POINTS) item_points_render(rend, item);
-        if (item->type == ITEM_ALPHA_TEXTURE || item->type == ITEM_FOG)
-            item_alpha_texture_render(rend, item);
-        if (item->type == ITEM_TEXTURE || item->type == ITEM_ATMOSPHERE)
+        switch (item->type) {
+        case ITEM_LINES:
+            item_lines_render(rend, item);
+            break;
+        case ITEM_LINES_GLOW:
+            item_lines_glow_render(rend, item);
+            break;
+        case ITEM_MESH:
+            item_mesh_render(rend, item);
+            break;
+        case ITEM_POINTS:
+            item_points_render(rend, item);
+            break;
+        case ITEM_TEXTURE:
             item_texture_render(rend, item);
-        if (item->type == ITEM_PLANET) item_planet_render(rend, item);
-        if (item->type == ITEM_VG_ELLIPSE) item_vg_render(rend, item);
-        if (item->type == ITEM_VG_RECT) item_vg_render(rend, item);
-        if (item->type == ITEM_VG_LINE) item_vg_render(rend, item);
-        if (item->type == ITEM_TEXT) item_text_render(rend, item);
-        if (item->type == ITEM_QUAD_WIREFRAME)
+            break;
+        case ITEM_ATMOSPHERE:
+            item_atmosphere_render(rend, item);
+            break;
+        case ITEM_FOG:
+            item_fog_render(rend, item);
+            break;
+        case ITEM_PLANET:
+            item_planet_render(rend, item);
+            break;
+        case ITEM_VG_ELLIPSE:
+        case ITEM_VG_RECT:
+        case ITEM_VG_LINE:
+            item_vg_render(rend, item);
+            break;
+        case ITEM_TEXT:
+            item_text_render(rend, item);
+            break;
+        case ITEM_QUAD_WIREFRAME:
             item_quad_wireframe_render(rend, item);
+            break;
+        default:
+            assert(false);
+        }
+
         DL_DELETE(rend->items, item);
         texture_release(item->tex);
         if (item->type == ITEM_PLANET)
@@ -1481,6 +1413,10 @@ static void line_glow(renderer_t           *rend_,
     item = get_item(rend, ITEM_LINES_GLOW, mesh->verts_count,
                     mesh->indices_count, NULL);
     if (item && memcmp(item->color, color, sizeof(color))) item = NULL;
+    if (item && item->lines.dash_length != painter->lines_dash_length)
+        item = NULL;
+    if (item && item->lines.dash_ratio != painter->lines_dash_ratio)
+        item = NULL;
 
 
     if (!item) {
@@ -1490,6 +1426,8 @@ static void line_glow(renderer_t           *rend_,
         gl_buf_alloc(&item->indices, &INDICES_BUF, 1024);
         item->lines.width = painter->lines_width;
         item->lines.glow = painter->lines_glow;
+        item->lines.dash_length = painter->lines_dash_length;
+        item->lines.dash_ratio = painter->lines_dash_ratio;
         memcpy(item->color, color, sizeof(color));
         DL_APPEND(rend->items, item);
     }
@@ -1629,7 +1567,7 @@ static void mesh(renderer_t          *rend_,
 
 static void ellipse_2d(renderer_t *rend_, const painter_t *painter,
                        const double pos[2], const double size[2],
-                       double angle)
+                       double angle, double dashes)
 {
     renderer_gl_t *rend = (void*)rend_;
     item_t *item;
@@ -1639,7 +1577,7 @@ static void ellipse_2d(renderer_t *rend_, const painter_t *painter,
     vec2_to_float(size, item->vg.size);
     vec4_to_float(painter->color, item->color);
     item->vg.angle = angle;
-    item->vg.dashes = painter->lines_stripes;
+    item->vg.dashes = dashes;
     item->vg.stroke_width = painter->lines_width;
     DL_APPEND(rend->items, item);
 }

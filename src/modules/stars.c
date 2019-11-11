@@ -221,7 +221,7 @@ static void star_render_name(const painter_t *painter, const star_data_t *s,
     double label_color[4] = {color[0], color[1], color[2], 0.5};
     static const double white[4] = {1, 1, 1, 1};
     const bool selected = core->selection && s->oid == core->selection->oid;
-    int effects = 0;
+    int effects = TEXT_FLOAT;
     char buf[128];
     char cst[5];
     obj_t *skycultures;
@@ -254,7 +254,7 @@ static void star_render_name(const painter_t *painter, const star_data_t *s,
 
     if (name) {
         labels_add_3d(sys_translate("skyculture", name), frame, pos, true,
-                      radius, FONT_SIZE_BASE, label_color, 0, LABEL_AROUND,
+                      radius, FONT_SIZE_BASE, label_color, 0, 0,
                       effects, -vmag, s->oid);
         return;
     }
@@ -265,7 +265,7 @@ static void star_render_name(const painter_t *painter, const star_data_t *s,
         snprintf(buf, sizeof(buf), "%s%.*d",
                  greek[bayer - 1], bayer_n ? 1 : 0, bayer_n);
         labels_add_3d(buf, frame, pos, true, radius, FONT_SIZE_BASE,
-                      label_color, 0, LABEL_AROUND, effects, -vmag, s->oid);
+                      label_color, 0, 0, effects, -vmag, s->oid);
     }
 }
 
@@ -352,7 +352,7 @@ void star_get_designations(
 static star_t *star_create(const star_data_t *data)
 {
     star_t *star;
-    star = (star_t*)obj_create("star", NULL, NULL, NULL);
+    star = (star_t*)obj_create("star", NULL, NULL);
     strncpy(star->obj.type, data->type, 4);
     star->data = *data;
     star->obj.oid = star->data.oid;
@@ -887,7 +887,7 @@ static void test_create_from_json(void)
         "       \"pm_ra\": 101.95"
         "   }"
         "}";
-    star = obj_create_str("star", NULL, NULL, data);
+    star = obj_create_str("star", NULL, data);
     assert(star);
     obj_get_info(star, core->observer, INFO_VMAG, &vmag);
     assert(fabs(vmag - 5.153) < 0.0001);

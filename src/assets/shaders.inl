@@ -117,7 +117,7 @@ static const unsigned char DATA_shaders_atmosphere_glsl[3591] __attribute__((ali
 
 ASSET_REGISTER(shaders_atmosphere_glsl, "shaders/atmosphere.glsl", DATA_shaders_atmosphere_glsl, false)
 
-static const unsigned char DATA_shaders_blit_glsl[796] __attribute__((aligned(4))) =
+static const unsigned char DATA_shaders_blit_glsl[986] __attribute__((aligned(4))) =
     "/* Stellarium Web Engine - Copyright (c) 2018 - Noctua Software Ltd\n"
     " *\n"
     " * This program is licensed under the terms of the GNU AGPL v3, or\n"
@@ -151,56 +151,19 @@ static const unsigned char DATA_shaders_blit_glsl[796] __attribute__((aligned(4)
     "\n"
     "void main()\n"
     "{\n"
+    "#ifndef TEXTURE_LUMINANCE\n"
     "    gl_FragColor = texture2D(u_tex, v_tex_pos) * v_color;\n"
+    "#else\n"
+    "    // Luminance mode: the texture only applies to the alpha channel.\n"
+    "    gl_FragColor = v_color;\n"
+    "    gl_FragColor.a *= texture2D(u_tex, v_tex_pos).r;\n"
+    "#endif\n"
     "}\n"
     "\n"
     "#endif\n"
     "";
 
 ASSET_REGISTER(shaders_blit_glsl, "shaders/blit.glsl", DATA_shaders_blit_glsl, false)
-
-static const unsigned char DATA_shaders_blit_tag_glsl[810] __attribute__((aligned(4))) =
-    "/* Stellarium Web Engine - Copyright (c) 2018 - Noctua Software Ltd\n"
-    " *\n"
-    " * This program is licensed under the terms of the GNU AGPL v3, or\n"
-    " * alternatively under a commercial licence.\n"
-    " *\n"
-    " * The terms of the AGPL v3 license can be found in the main directory of this\n"
-    " * repository.\n"
-    " */\n"
-    "\n"
-    "uniform lowp    vec4        u_color;\n"
-    "uniform mediump sampler2D   u_tex;\n"
-    "\n"
-    "varying mediump vec2        v_tex_pos;\n"
-    "varying lowp    vec4        v_color;\n"
-    "\n"
-    "#ifdef VERTEX_SHADER\n"
-    "\n"
-    "attribute highp     vec4 a_pos;\n"
-    "attribute mediump   vec2 a_tex_pos;\n"
-    "attribute lowp      vec3 a_color;\n"
-    "\n"
-    "void main()\n"
-    "{\n"
-    "    gl_Position = a_pos;\n"
-    "    v_tex_pos = a_tex_pos;\n"
-    "    v_color = vec4(a_color, 1.0) * u_color;\n"
-    "}\n"
-    "\n"
-    "#endif\n"
-    "#ifdef FRAGMENT_SHADER\n"
-    "\n"
-    "void main()\n"
-    "{\n"
-    "    gl_FragColor = v_color;\n"
-    "    gl_FragColor.a *= texture2D(u_tex, v_tex_pos).r;\n"
-    "}\n"
-    "\n"
-    "#endif\n"
-    "";
-
-ASSET_REGISTER(shaders_blit_tag_glsl, "shaders/blit_tag.glsl", DATA_shaders_blit_tag_glsl, false)
 
 static const unsigned char DATA_shaders_fog_glsl[772] __attribute__((aligned(4))) =
     "/* Stellarium Web Engine - Copyright (c) 2018 - Noctua Software Ltd\n"
@@ -245,7 +208,7 @@ static const unsigned char DATA_shaders_fog_glsl[772] __attribute__((aligned(4))
 
 ASSET_REGISTER(shaders_fog_glsl, "shaders/fog.glsl", DATA_shaders_fog_glsl, false)
 
-static const unsigned char DATA_shaders_lines_glsl[1221] __attribute__((aligned(4))) =
+static const unsigned char DATA_shaders_lines_glsl[1713] __attribute__((aligned(4))) =
     "/* Stellarium Web Engine - Copyright (c) 2019 - Noctua Software Ltd\n"
     " *\n"
     " * This program is licensed under the terms of the GNU AGPL v3, or\n"
@@ -259,6 +222,13 @@ static const unsigned char DATA_shaders_lines_glsl[1221] __attribute__((aligned(
     "uniform   lowp      float   u_line_width;\n"
     "uniform   lowp      float   u_line_glow;\n"
     "uniform   lowp      vec4    u_color;\n"
+    "\n"
+    "#ifdef DASH\n"
+    "// Dash effect defined as a total length (dash and space, in uv unit),\n"
+    "// and the ratio of the dash dot to the length.\n"
+    "uniform   lowp      float   u_dash_length;\n"
+    "uniform   lowp      float   u_dash_ratio;\n"
+    "#endif\n"
     "\n"
     "varying   mediump   vec2    v_uv;\n"
     "\n"
@@ -285,6 +255,14 @@ static const unsigned char DATA_shaders_lines_glsl[1221] __attribute__((aligned(
     "    mediump float glow = (1.0 - dist / 5.0) * u_line_glow;\n"
     "    // Only use the most visible of both to avoid changing brightness\n"
     "    gl_FragColor = vec4(u_color.rgb, u_color.a * max(glow, base));\n"
+    "\n"
+    "#ifdef DASH\n"
+    "    lowp float len = u_dash_length;\n"
+    "    lowp float r = u_dash_ratio;\n"
+    "    gl_FragColor.a *= smoothstep(len / 2.0 * r + 0.01,\n"
+    "                                 len / 2.0 * r - 0.01,\n"
+    "                                 abs(mod(v_uv.x, len) - len / 2.0));\n"
+    "#endif\n"
     "}\n"
     "\n"
     "#endif\n"

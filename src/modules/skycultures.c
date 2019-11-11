@@ -68,7 +68,6 @@ static void skyculture_deactivate(skyculture_t *cult)
     DL_FOREACH_SAFE(constellations->children, cst, tmp) {
         if (str_startswith(cst->id, "CST ")) {
             module_remove(constellations, cst);
-            obj_release(cst);
         }
     }
 }
@@ -90,14 +89,15 @@ static void skyculture_activate(skyculture_t *cult)
     for (i = 0; i < cult->nb_constellations; i++) {
         cst = &cult->constellations[i];
         snprintf(id, sizeof(id), "CST %s", cst->id);
-        cons = obj_get(constellations, id, 0);
+        cons = module_get_child(constellations, id);
         if (cons) {
+            module_remove(constellations, cons);
             obj_release(cons);
             continue;
         }
         args = json_object_new(0);
         json_object_push(args, "info_ptr", json_integer_new((int64_t)cst));
-        obj_create("constellation", id, constellations, args);
+        module_add_new(constellations, "constellation", id, args);
         json_builder_free(args);
     }
 
@@ -106,7 +106,7 @@ static void skyculture_activate(skyculture_t *cult)
         for (i = 0; i < cult->imgs->u.array.length; i++) {
             args = cult->imgs->u.array.values[i];
             snprintf(id, sizeof(id), "CST %s", json_get_attr_s(args, "id"));
-            cons = obj_get(constellations, id, 0);
+            cons = module_get_child(constellations, id);
             if (!cons) continue;
             constellation_set_image(cons, args);
             obj_release(cons);
@@ -136,7 +136,7 @@ static skyculture_t *add_from_uri(skycultures_t *cults, const char *uri,
                                   const char *id)
 {
     skyculture_t *cult;
-    cult = (void*)obj_create("skyculture", id, (obj_t*)cults, NULL);
+    cult = (void*)module_add_new(&cults->obj, "skyculture", id, NULL);
     cult->uri = strdup(uri);
     skyculture_update((obj_t*)cult, 0);
     return cult;

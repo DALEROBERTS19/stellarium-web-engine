@@ -88,7 +88,7 @@ static void load_data(comets_t *comets, const char *data, int size)
             continue;
         }
 
-        comet = (void*)obj_create("mpc_comet", NULL, &comets->obj, NULL);
+        comet = (void*)module_add_new(&comets->obj, "mpc_comet", NULL, NULL);
         comet->num = num;
         comet->amag = h;
         comet->slope_param = g;
@@ -225,8 +225,8 @@ static int comet_render(const obj_t *obj, const painter_t *painter)
         if (selected)
             vec4_set(label_color, 1, 1, 1, 1);
         labels_add_3d(comet->name, FRAME_ICRF, comet->pvo[0], false, size,
-            FONT_SIZE_BASE, label_color, 0, LABEL_AROUND,
-            selected ? TEXT_BOLD : 0,
+            FONT_SIZE_BASE, label_color, 0, 0,
+            selected ? TEXT_BOLD : TEXT_FLOAT,
             0, obj->oid);
     }
     return 0;

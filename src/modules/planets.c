@@ -23,7 +23,6 @@ typedef struct planet planet_t;
 struct planet {
     obj_t       obj;
 
-    UT_hash_handle  hh;    // For the global map.
     const char  *name;
     planet_t    *parent;
     double      radius_m;  // (meter)
@@ -226,34 +225,44 @@ static int sun_update(planet_t *planet, const observer_t *obs)
     return 0;
 }
 
-static int moon_update(planet_t *planet, const observer_t *obs)
+/*
+ * Function: moon_icrf_geocentric
+ * Compute moon position at a given time
+ *
+ * Parameters:
+ *   tt     - TT time in MJD.
+ *   pos    - Output position in ICRF frame, geocentric.
+ */
+static void moon_icrf_geocentric_pos(double tt, double pos[3])
 {
-    double i;   // Phase angle.
-    double lambda, beta, dist;
     double rmatecl[3][3], rmatp[3][3];
-    double obl;
-    double pos[3], el;
-    double pv[2][3];
+    double lambda, beta, dist, obl;
     // Get ecliptic position of date.
-    moon_pos(DJM0 + obs->tt, &lambda, &beta, &dist);
+    moon_pos(DJM0 + tt, &lambda, &beta, &dist);
     dist *= 1000.0 / DAU; // km to AU.
     // Convert to equatorial.
-    obl = eraObl06(DJM0, obs->tt); // Mean oblicity of ecliptic at J2000.
+    obl = eraObl06(DJM0, tt); // Mean oblicity of ecliptic at J2000.
     eraIr(rmatecl);
     eraRx(-obl, rmatecl);
     eraS2p(lambda, beta, dist, pos);
     eraRxp(rmatecl, pos, pos);
-
     // Precess back to J2000.
-    eraPmat76(DJM0, obs->tt, rmatp);
+    eraPmat76(DJM0, tt, rmatp);
     eraTrxp(rmatp, pos, pos);
+}
 
-    eraCp(pos, pv[0]);
-    // We don't know the speed, set to zero as moon (geocentric) speed is too
-    // small for most effects anyway
-    pv[1][0] = 0;
-    pv[1][1] = 0;
-    pv[1][2] = 0;
+static int moon_update(planet_t *planet, const observer_t *obs)
+{
+    double i;   // Phase angle.
+    double el, dist;
+    double pv[2][3];
+
+    moon_icrf_geocentric_pos(obs->tt, pv[0]);
+    dist = vec3_norm(pv[0]);
+
+    // Compute the speed using the position in one day.
+    moon_icrf_geocentric_pos(obs->tt + 1, pv[1]);
+    vec3_sub(pv[1], pv[0], pv[1]);
 
     // Compute heliocentric position.
     eraPvppv(pv, obs->earth_pvh, planet->pvh);
@@ -790,6 +799,8 @@ static void planet_render_orbit(const planet_t *planet,
     painter.depth_range = &depth_range;
 
     painter.lines_width = 1.5;
+    painter.lines_dash_length = 8;
+    painter.lines_dash_ratio = 0.5;
     paint_orbit(&painter, FRAME_ICRF, mat, painter.obs->tt,
                 in, om, w, a, n, ec, ma);
 }
@@ -824,8 +835,8 @@ static void planet_render_label(
 
     labels_add_3d(label, FRAME_ICRF, pos,
                   true, s + 4, FONT_SIZE_BASE,
-                  selected ? white : label_color, 0, LABEL_AROUND,
-                  selected ? TEXT_BOLD : 0,
+                  selected ? white : label_color, 0, 0,
+                  selected ? TEXT_BOLD : TEXT_FLOAT,
                   -planet->vmag, planet->obj.oid);
 }
 
@@ -928,7 +939,11 @@ static void planet_render(const planet_t *planet, const painter_t *painter_)
                            hips_alpha, &painter);
     }
 
-    if (selected || vmag <= painter.hints_limit_mag - 1.0)
+    // Note: I force rendering the label if the hips is visible for the
+    // moment because the vmag is not a good measure for planets: if the
+    // planet is big on the screen, we should see the label, no matter the
+    // vmag.
+    if (selected || vmag <= painter.hints_limit_mag - 1.0 || hips_alpha > 0)
         planet_render_label(planet, &painter, r_scale, point_size);
 
     // For the moment we never render the orbits!
@@ -936,7 +951,9 @@ static void planet_render(const planet_t *planet, const painter_t *painter_)
     // so that it works with any body, not just planets.  But this is
     // hard to know in advance what depth range to use.  I leave this
     // disabled until I implement a deferred renderer.
-    if ((0)) planet_render_orbit(planet, 1.0, &painter);
+    if (0 && planet->parent) {
+        planet_render_orbit(planet, 1.0, &painter);
+    }
 
     // Render the Sun halo.
     if (planet->id == SUN) {
@@ -991,18 +1008,6 @@ static obj_t *planets_get_by_oid(
     return NULL;
 }
 
-/*
- * Conveniance function to look for a planet by name
- */
-static planet_t *planet_get_by_name(planets_t *planets, const char *name)
-{
-    planet_t *planet;
-    char id[64];
-    str_to_upper(name, id);
-    HASH_FIND_STR(planets->planets, id, planet);
-    return planet;
-}
-
 // Parse an orbit line as returned by HORIZONS online service.
 static int parse_orbit(planet_t *p, const char *v)
 {
@@ -1032,6 +1037,19 @@ static int parse_orbit(planet_t *p, const char *v)
     return 0;
 }
 
+/*
+ * Conveniance function to look for a planet by name
+ */
+static planet_t *planet_get_by_name(planets_t *planets, const char *name)
+{
+    planet_t *p;
+    PLANETS_ITER(planets, p) {
+        if (strcasecmp(p->name, name) == 0)
+            return p;
+    }
+    return NULL;
+}
+
 // Parse the planet data.
 static int planets_ini_handler(void* user, const char* section,
                                const char* attr, const char* value)
@@ -1042,11 +1060,10 @@ static int planets_ini_handler(void* user, const char* section,
     float v;
 
     str_to_upper(section, id);
-    HASH_FIND_STR(planets->planets, id, planet);
+
+    planet = planet_get_by_name(planets, section);
     if (!planet) {
-        planet = (void*)obj_create("planet", id, (obj_t*)planets, NULL);
-        HASH_ADD_KEYPTR(hh, planets->planets, planet->obj.id,
-                        strlen(planet->obj.id), planet);
+        planet = (void*)module_add_new(&planets->obj, "planet", id, NULL);
         strcpy(name, section);
         name[0] += 'A' - 'a';
         planet->name = strdup(name);

@@ -120,7 +120,7 @@ static void load_data(mplanets_t *mplanets, const char *data, int size)
             nb_err++;
             continue;
         }
-        mplanet = (void*)obj_create("asteroid", NULL, &mplanets->obj, NULL);
+        mplanet = (void*)module_add_new(&mplanets->obj, "asteroid", NULL, NULL);
         mplanet->orbit.d = epoch;
         mplanet->orbit.m = m * DD2R;
         mplanet->orbit.w = w * DD2R;
@@ -273,8 +273,8 @@ static int mplanet_render(const obj_t *obj, const painter_t *painter)
         if (selected)
             vec4_set(label_color, 1, 1, 1, 1);
         labels_add_3d(mplanet->name, FRAME_ICRF, pvo[0], false, size,
-                      FONT_SIZE_BASE, label_color, 0, LABEL_AROUND,
-                      selected ? TEXT_BOLD : 0,
+                      FONT_SIZE_BASE, label_color, 0, 0,
+                      selected ? TEXT_BOLD : TEXT_FLOAT,
                       0, obj->oid);
     }
     return 0;

@@ -238,7 +238,7 @@ int paint_texture(const painter_t *painter,
 }
 
 
-static void line_func(void *user, double t, double out[2])
+static void line_func(void *user, double t, double out[4])
 {
     double pos[4];
     const painter_t *painter = USER_GET(user, 0);
@@ -249,11 +249,8 @@ static void line_func(void *user, double t, double out[2])
     vec4_mix(line[0], line[1], t, pos);
     if (map) uv_map(map, pos, pos, NULL);
     vec3_normalize(pos, pos);
-    convert_frame(painter->obs, frame, FRAME_VIEW, true, pos, pos);
-    pos[3] = 0.0;
-    project(painter->proj, PROJ_ALREADY_NORMALIZED | PROJ_TO_WINDOW_SPACE,
-            pos, pos);
-    vec2_copy(pos, out);
+    convert_frame(painter->obs, frame, FRAME_VIEW, true, pos, out);
+    out[3] = 0.0;
 }
 
 /*
@@ -296,17 +293,16 @@ static bool cap_intersects_discontinuity_line(
 }
 
 
-static int paint_line(const painter_t *painter,
-                      int frame,
-                      double line[2][4], const uv_map_t *map,
-                      int split, int flags)
+int paint_line(const painter_t *painter,
+               int frame,
+               double line[2][4], const uv_map_t *map,
+               int split, int flags)
 {
     int i, size;
     double view_pos[2][4];
     double (*win_line)[2] = NULL;
     bool discontinuous = false;
     double splits[2][2][4];
-    double max_size = min(painter->fb_size[0], painter->fb_size[1]) / 2;
 
     if (!map) assert(flags & PAINTER_SKIP_DISCONTINUOUS); // For the moment.
 
@@ -327,8 +323,9 @@ static int paint_line(const painter_t *painter,
     if (discontinuous)
         goto split;
 
-    size = line_tesselate(line_func, USER_PASS(painter, &frame, line, map),
-                          split, max_size, &win_line);
+    size = line_tesselate(line_func, painter->proj,
+                          USER_PASS(painter, &frame, line, map),
+                          split, &win_line);
     if (size < 0) goto split;
     REND(painter->rend, line, painter, win_line, size);
     free(win_line);
@@ -345,22 +342,6 @@ split:
     paint_line(painter, frame, splits[0], map, split / 2, flags);
     paint_line(painter, frame, splits[1], map, split / 2, flags);
     return 0;
-}
-
-int paint_lines(const painter_t *painter,
-                int frame,
-                int nb, double (*lines)[4],
-                const uv_map_t *map,
-                int split, int flags)
-{
-    int i, ret = 0;
-    assert(nb % 2 == 0);
-    assert(lines);
-    // XXX: we should check for discontinutiy before we can paint_line.
-    // So that we don't abort in the middle of the rendering.
-    for (i = 0; i < nb; i += 2)
-        ret |= paint_line(painter, frame, (void*)lines[i], map, split, flags);
-    return ret;
 }
 
 /*
@@ -666,7 +647,7 @@ int paint_orbit(const painter_t *painter, int frame,
     double line[2][4] = {{0}, {1}};
     // We only support ICRF for the moment to make things simpler.
     assert(frame == FRAME_ICRF);
-    paint_line(painter, frame, line, &map, 128, 1);
+    paint_line(painter, frame, line, &map, 128, 0);
     return 0;
 }
 
@@ -690,7 +671,7 @@ int paint_2d_ellipse(const painter_t *painter_,
                      const double size[2],
                      double label_pos[2])
 {
-    double a2, b2, perimeter, p[3], s[2], a, m[3][3], angle;
+    double a2, b2, perimeter, p[3], s[2], a, m[3][3], angle, nb_dashes = 0;
     painter_t painter = *painter_;
 
     // Apply the pos, size and angle.
@@ -703,17 +684,16 @@ int paint_2d_ellipse(const painter_t *painter_,
     b2 = vec2_norm2(m[1]);
 
     // Estimate the number of dashes.
-    painter.lines_stripes = 0;
     if (dashes) {
         perimeter = 2 * M_PI * sqrt((a2 + b2) / 2);
-        painter.lines_stripes = perimeter / dashes;
+        nb_dashes = perimeter / dashes;
     }
 
     vec2_copy(m[2], p);
     s[0] = sqrt(a2);
     s[1] = sqrt(b2);
     angle = atan2(m[0][1], m[0][0]);
-    REND(painter.rend, ellipse_2d, &painter, p, s, angle);
+    REND(painter.rend, ellipse_2d, &painter, p, s, angle, nb_dashes);
 
     if (label_pos) {
         label_pos[1] = DBL_MAX;
@@ -785,13 +765,14 @@ void paint_cap(const painter_t *painter, int frame, double cap[4])
     double r;
     double p[4];
 
+    if (cap[3] >= 1.0) return;
     if (!cap_intersects_cap(painter->clip_info[frame].bounding_cap, cap))
         return;
 
     vec3_copy(cap, p);
     p[3] = 0;
     r = acos(cap[3]) * 2;
-    obj_t* obj = obj_create("circle", "cap_circle", NULL, NULL);
+    obj_t* obj = obj_create("circle", "cap_circle", NULL);
     obj_set_attr(obj, "pos", p);
     obj_set_attr(obj, "frame", frame);
     double size[2] = {r, r};

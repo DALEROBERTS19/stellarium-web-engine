@@ -53,6 +53,10 @@ enum {
     TEXT_BOLD      = 1 << 1,
     TEXT_SMALL_CAP = 1 << 2,
     TEXT_DEMI_BOLD = 1 << 3,
+    TEXT_BLEND_ADD = 1 << 4, // Use ADD blending.
+    // Only used in the label manager.  If set, the text position or opacity
+    // can be changed dynamically to avoid collisions.
+    TEXT_FLOAT     = 1 << 5,
 };
 
 enum {
@@ -121,7 +125,8 @@ struct renderer
                        const painter_t  *painter,
                        const double     pos[2],
                        const double     size[2],
-                       double           angle);
+                       double           angle,
+                       double           nb_dashes);
 
     void (*rect_2d)(renderer_t          *rend,
                     const painter_t     *painter,
@@ -189,8 +194,10 @@ struct painter
     double          hard_limit_mag;
 
     double          lines_width;
-    double          lines_stripes;
     double          lines_glow;
+    double          lines_dash_length;  // Dash length in pixel.
+    double          lines_dash_ratio;   // 0.5 for equal dash / space.
+
     // Point halo / core ratio (zero for no halo).
     double          points_halo;
     double          (*depth_range)[2]; // If set use depth test.
@@ -314,14 +321,17 @@ int paint_tile_contour(const painter_t *painter, int frame,
                        int order, int pix, int split);
 
 /*
- * Function: paint_lines
- * Render 3d lines.
+ * Function: paint_line
+ * Render a 3d line.
+ *
+ * Warning: using the mapping function, it is in theory possible to render
+ * a very large line with any shape in a single call.  However the current
+ * implementation doesn't work well in that case.
  *
  * Parameters:
  *   painter    - A painter instance.
  *   frame      - Frame of the inputs.
- *   nb         - Number of vertices.
- *   lines      - Vertices of the lines: [a0, a1, b0, b1, c0, c1, ...]
+ *   lines      - Vertices of the lines.
  *   map        - Optional function that can be used to represent lines as
  *                parametric function.  If set then the actual coordinates
  *                of the lines are the mapping of the point through this
@@ -333,11 +343,10 @@ int paint_tile_contour(const painter_t *painter, int frame,
  *                  PAINTER_SKIP_DISCONTINUOUS - if set, any line that
  *                  intersects a discontinuity is ignored.
  */
-int paint_lines(const painter_t *painter,
-                int frame,
-                int nb, double (*lines)[4],
-                const uv_map_t *map,
-                int split, int flags);
+int paint_line(const painter_t *painter,
+               int frame,
+               double line[2][4], const uv_map_t *map,
+               int split, int flags);
 
 /*
  * Function: paint_mesh
@@ -362,10 +371,13 @@ int paint_text_bounds(const painter_t *painter, const char *text,
  * Render text
  *
  * Parameters:
- *   text   - the text to render.
- *   pos    - text position in window coordinates.
- *   align  - union of <ALIGN_FLAGS>.
- *   size   - text size in window unit.
+ *   text       - The text to render.
+ *   pos        - Text position in window coordinates.
+ *   align      - Union of <ALIGN_FLAGS>.
+ *   effects    - Union of <TEXT_EFFECT_FLAGS>.
+ *   size       - Text size in window unit.
+ *   color      - RGBA color.
+ *   angle      - Angle in radian.
  */
 int paint_text(const painter_t *painter,
                const char *text, const double pos[2], int align,

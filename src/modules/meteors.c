@@ -153,7 +153,7 @@ static int meteors_update(obj_t *obj, double dt)
     proba = ms->zhr * dt / 3600;
 
     if (nb < max_nb && frand(0, 1) < proba) {
-        obj_create("meteor", NULL, obj, NULL);
+        module_add_new(obj, "meteor", NULL, NULL);
     }
 
     DL_FOREACH_SAFE(obj->children, child, tmp) {
@@ -161,7 +161,6 @@ static int meteors_update(obj_t *obj, double dt)
         meteor_update(child, dt);
         if (m->time > m->duration) {
             module_remove(obj, child);
-            obj_release(child);
         }
     }
 

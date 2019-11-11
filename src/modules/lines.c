@@ -108,6 +108,14 @@ static struct {
         .grid       = true,
     },
     {
+        .name       = "Equatorial (of date)",
+        .id         = "equatorial_jnow",
+        .color      = 0x2a81ad80,
+        .frame      = FRAME_CIRS,
+        .format     = 'h',
+        .grid       = true,
+    },
+    {
         .name       = "Meridian",
         .id         = "meridian",
         .color      = 0x339933ff,
@@ -201,7 +209,7 @@ static int lines_init(obj_t *obj, json_value *args)
     line_t *line;
 
     for (i = 0; i < ARRAY_SIZE(LINES); i++) {
-        line = (line_t*)obj_create("line", LINES[i].id, lines, NULL);
+        line = (line_t*)module_add_new(lines, "line", LINES[i].id, NULL);
         line->frame = LINES[i].frame;
         line->grid = LINES[i].grid;
         hex_to_rgba(LINES[i].color, line->color);
@@ -255,6 +263,110 @@ static int line_update(obj_t *obj, double dt)
     return changed ? 1 : 0;
 }
 
+static void ndc_to_win(const projection_t *proj, const double ndc[2],
+                       double win[2])
+{
+    win[0] = (+ndc[0] + 1) / 2 * proj->window_size[0];
+    win[1] = (-ndc[1] + 1) / 2 * proj->window_size[1];
+}
+
+/*
+ * Function: segment_viewport_intersection
+ * Compute the intersection between a segment and the viewport.
+ *
+ * Parameters:
+ *   a      - Segment point A, in ndc coordinates (-1 to +1).
+ *   b      - Segment point B, in ndc coordinates (-1 to +1).
+ *   border - Output of the viewport border index, from 0 to 3.
+ *
+ * Returns:
+ *   The intersection position within the segment:
+ *   P = A + ret * (AB)
+ *   If there are no intersection, returns DBL_MAX.
+ *
+ */
+static double segment_viewport_intersection(
+        const double a[2], const double b[2], int *border)
+{
+    // We use the common 'slab' algo for AABB/seg intersection.
+    // With some care to make sure we never use infinite values.
+    double idx, idy,
+           tx1 = -DBL_MAX, tx2 = +DBL_MAX,
+           ty1 = -DBL_MAX, ty2 = +DBL_MAX,
+           txmin = -DBL_MAX, txmax = +DBL_MAX,
+           tymin = -DBL_MAX, tymax = +DBL_MAX,
+           ret = DBL_MAX, vmin, vmax;
+    if (a[0] != b[0]) {
+        idx = 1.0 / (b[0] - a[0]);
+        tx1 = (-1 == a[0] ? -DBL_MAX : (-1 - a[0]) * idx);
+        tx2 = (+1 == a[0] ?  DBL_MAX : (+1 - a[0]) * idx);
+        txmin = min(tx1, tx2);
+        txmax = max(tx1, tx2);
+    }
+    if (a[1] != b[1]) {
+        idy = 1.0 / (b[1] - a[1]);
+        ty1 = (-1 == a[1] ? -DBL_MAX : (-1 - a[1]) * idy);
+        ty2 = (+1 == a[1] ?  DBL_MAX : (+1 - a[1]) * idy);
+        tymin = min(ty1, ty2);
+        tymax = max(ty1, ty2);
+    }
+    ret = DBL_MAX;
+    if (tymin <= txmax && txmin <= tymax) {
+        vmin = max(txmin, tymin);
+        vmax = min(txmax, tymax);
+        if (0.0 <= vmax && vmin <= 1.0) {
+            ret = vmin >= 0 ? vmin : vmax;
+        }
+    }
+    *border = (ret == tx1) ? 0 :
+              (ret == tx2) ? 1 :
+              (ret == ty1) ? 2 :
+                             3;
+
+    return ret;
+}
+
+/*
+ * Function: check_borders
+ *
+ * Test if a segment intersects the window viewport.
+ *
+ * Parameters:
+ *   a      - Segment pos A in view coordinates.
+ *   b      - Semgnet pos B in view coordinates.
+ *   proj   - The view projection.
+ *   p      - Output of intersection in windows coordinates.
+ *   u      - Output direction of the line at the intersection.
+ *   v      - Output of the normal of the window border at the intersection.
+ *
+ */
+static bool check_borders(const double a[3], const double b[3],
+                          const projection_t *proj,
+                          double p[2], // Window pos on the border.
+                          double u[2], // Window direction of the line.
+                          double v[2]) // Window Norm of the border.
+{
+    double pos[2][4], q;
+    bool visible[2];
+    int border;
+    const double VS[4][2] = {{+1, 0}, {-1, 0}, {0, -1}, {0, +1}};
+    visible[0] = project(proj, PROJ_TO_NDC_SPACE, a, pos[0]);
+    visible[1] = project(proj, PROJ_TO_NDC_SPACE, b, pos[1]);
+    if (visible[0] != visible[1]) {
+        q = segment_viewport_intersection(pos[0], pos[1], &border);
+        if (q == DBL_MAX) return false;
+        vec2_mix(pos[0], pos[1], q, p);
+        ndc_to_win(proj, p, p);
+        ndc_to_win(proj, pos[0], pos[0]);
+        ndc_to_win(proj, pos[1], pos[1]);
+        vec2_sub(pos[1], pos[0], u);
+        vec2_copy(VS[border], v);
+        return true;
+    }
+    return false;
+}
+
+
 static void spherical_project(
         const uv_map_t *map, const double v[2], double out[4])
 {
@@ -266,11 +378,6 @@ static void spherical_project(
     mat3_mul_vec3(*rot, out, out);
     out[3] = 0; // Project to infinity.
 }
-
-static bool check_borders(const double a[3], const double b[3],
-                          const projection_t *proj,
-                          double p[2], double u[2],
-                          double v[2]);
 
 /*
  * Function: render_label
@@ -358,45 +465,53 @@ static void render_label(const double p[2], const double u[2],
 /*
  * Render a grid/line, by splitting the sphere into parts until we reach
  * the resolution of the grid.
+ *
+ * Parameters:
+ *   splits     - Represents the size of the quad in U and V as number of
+ *                splits from the full 360° circle.
+ *   pos        - Position of the quad as split index in U and V.
+ *   steps      - The target steps for the line rendering.
  */
 static void render_recursion(
         const line_t *line, const painter_t *painter,
         const double rot[3][3],
         int level,
         const int splits[2],
-        const double mat[3][3],
-        const step_t *steps[2],
-        int done_mask)
+        const int pos[2],
+        const step_t *steps[2])
 {
     int i, j, dir;
-    int split_az, split_al, new_splits[2];
-    double new_mat[3][3], p[4], lines[4][4] = {}, u[2], v[2];
-    double pos[4][4], pos_clip[4][4];
+    int split_az, split_al, new_splits[2], new_pos[2];
+    double p[4], lines[4][4] = {}, u[2], v[2];
+    double pos_view[4][4], pos_clip[4][4];
     double uv[4][2] = {{0.0, 1.0}, {1.0, 1.0}, {0.0, 0.0}, {1.0, 0.0}};
+    double mat[3][3] = MAT3_IDENTITY;
     uv_map_t map = {
         .map   = spherical_project,
         .user  = rot,
     };
 
-    if (done_mask == 3) return; // Already done.
+    // Compute transformation matrix from full sphere uv to the quad uv.
+    mat3_iscale(mat, 1. / splits[0], 1. / splits[1], 0);
+    mat3_itranslate(mat, pos[0], pos[1]);
 
     // Compute quad corners in clipping space.
     for (i = 0; i < 4; i++) {
         mat3_mul_vec2(mat, uv[i], p);
         spherical_project(&map, p, p);
         convert_framev4(painter->obs, line->frame, FRAME_VIEW, p, p);
-        vec4_copy(p, pos[i]);
+        vec4_copy(p, pos_view[i]);
         project(painter->proj, 0, p, p);
         vec4_copy(p, pos_clip[i]);
     }
     // If the quad is clipped we stop the recursion.
     // We only start to test after a certain level to prevent distortion
     // error with big quads at low levels.
-    if (level > 2 && is_clipped(pos, pos_clip))
+    if (level > 2 && is_clipped(pos_view, pos_clip))
         return;
 
     // Nothing to render yet.
-    if (level < steps[0]->level && level < steps[1]->level)
+    if (level < steps[0]->level || level < steps[1]->level)
         goto keep_going;
     // To get a good enough resolution of lines, don't attempt to render
     // before level 2.
@@ -409,20 +524,28 @@ static void render_recursion(
     vec2_copy(uv[1], lines[3]);
 
     for (dir = 0; dir < 2; dir++) {
-        if (!line->grid && dir == 1) break;
-        if (done_mask & (1 << dir)) continue; // Marked as done already.
-        if (splits[dir] != steps[dir]->n / (dir ? 2 : 1)) continue;
-        done_mask |= (1 << dir);
-        paint_lines(painter, line->frame, 2, lines + dir * 2, &map, 8, 0);
+        // Single line are just grid with most segments masked.
+        if (!line->grid && dir == 0) continue;
+        if (!line->grid && pos[1] != splits[1] / 2 - 1) continue;
+
+        // Don't render last latitude, zero diameter circle at the north pole.
+        if (dir == 1 && pos[1] == splits[1] - 1) continue;
+
+        // Limit to 4 meridian lines around the poles.
+        if (    line->grid && dir == 0 &&
+                (pos[0] % (splits[0] / 4) != 0) &&
+                (pos[1] == 0 || pos[1] == splits[1] - 1))
+            continue;
+
+        paint_line(painter, line->frame, lines + dir * 2, &map, 8, 0);
         if (!line->format) continue;
-        if (check_borders(pos[0], pos[2 - dir], painter->proj, p, u, v)) {
+        if (check_borders(pos_view[0], pos_view[2 - dir], painter->proj,
+                          p, u, v)) {
             render_label(p, u, v, uv[0], 1 - dir, line,
                          splits[dir] * (dir + 1), painter);
         }
     }
-
-    // Nothing left to render.
-    if (level >= steps[0]->level && level >= steps[1]->level) return;
+    return;
 
 keep_going:
     // Split this quad into smaller pieces.
@@ -433,67 +556,102 @@ keep_going:
 
     for (i = 0; i < split_al; i++)
     for (j = 0; j < split_az; j++) {
-        mat3_copy(mat, new_mat);
-        mat3_iscale(new_mat, 1. / split_az, 1. / split_al, 1.0);
-        mat3_itranslate(new_mat, j, i);
-        render_recursion(line, painter, rot, level + 1, new_splits, new_mat,
-                         steps, done_mask);
+        new_pos[0] = pos[0] * split_az + j;
+        new_pos[1] = pos[1] * split_al + i;
+        render_recursion(line, painter, rot, level + 1, new_splits, new_pos,
+                         steps);
     }
 }
 
-// Compute an estimation of the visible range of azimuthal angle.  If we look
-// at the pole it can go up to 360°.
-static double get_theta_range(const painter_t *painter, int frame)
+/*
+ * Compute an estimation of the visible range of azimuthal and altitude angles.
+ *
+ * Note: this is not really azimuth and altitude, but the phi and theta range
+ * in the given frame.  I call it azalt here to make it easier to think about
+ * it in this frame.
+ *
+ * This returns an estimation of the max angular separation of two points on
+ * the screen in both direction.  So for example at the pole the azfov should
+ * go up to 260°.
+ */
+static void get_azalt_fov(const painter_t *painter, int frame,
+                          double *azfov, double *altfov)
 {
     double p[4] = {0, 0, 0, 0};
-    double theta, phi;
-    double theta_max = -DBL_MAX, theta_min = DBL_MAX;
+    double theta0, phi0, theta, phi;
+    double theta_max = 0, theta_min = 0;
+    double phi_max = 0, phi_min = 0;
     int i;
 
     /*
      * This works by unprojection the four screen corners into the grid
-     * frame and testing the maximum and minimum distance to the meridian
-     * for each of them.
+     * frame and testing the maximum and minimum distance to the central
+     * point for each of them.
      */
+    project(painter->proj, PROJ_BACKWARD, p, p);
+    convert_frame(painter->obs, FRAME_VIEW, frame, true, p, p);
+    eraC2s(p, &theta0, &phi0);
+
     for (i = 0; i < 4; i++) {
         p[0] = 2 * ((i % 2) - 0.5);
         p[1] = 2 * ((i / 2) - 0.5);
         project(painter->proj, PROJ_BACKWARD, p, p);
         convert_frame(painter->obs, FRAME_VIEW, frame, true, p, p);
         eraC2s(p, &theta, &phi);
+
+        theta = eraAnpm(theta - theta0);
         theta_max = max(theta_max, theta);
         theta_min = min(theta_min, theta);
+
+        phi = eraAnpm(phi - phi0);
+        phi_max = max(phi_max, phi);
+        phi_min = min(phi_min, phi);
     }
-    return theta_max - theta_min;
+    *azfov = theta_max - theta_min;
+    *altfov = phi_max - phi_min;
+}
+
+// Get the step with the closest value to a given angle.
+static const step_t *steps_lookup(const step_t *steps, int size, double a)
+{
+    int i;
+
+    a = 2 * M_PI / a; // Put angle in splits.
+    for (i = 0; i < size - 1; i++) {
+        if (steps[i].n >= a)
+            break;
+    }
+
+    if ((i > 0) && fabs(a - steps[i - 1].n) < fabs(a - steps[i].n))
+        return &steps[i - 1];
+
+    return &steps[i];
 }
 
 
-// XXX: make it better.
-static void get_steps(double fov, char type, int frame,
+static void get_steps(char type, int frame,
                       const painter_t *painter,
                       const step_t *steps[2])
 {
-    double a = fov / 8;
-    int i;
-    double theta_range = get_theta_range(painter, frame);
-    if (type == 'd') {
-        i = (int)round(1.5 * log(2 * M_PI / a));
-        i = min(i, ARRAY_SIZE(STEPS_DEG) - 1);
-        if (STEPS_DEG[i].n % 4) i++;
-        steps[0] = &STEPS_DEG[i];
-        steps[1] = &STEPS_DEG[i];
-    } else {
-        i = (int)round(1.5 * log(2 * M_PI / a));
-        i = min(i, ARRAY_SIZE(STEPS_DEG) - 1);
-        if (STEPS_DEG[i].n % 4) i++;
-        steps[1] = &STEPS_DEG[i];
-        i = (int)round(1.5 * log(2 * M_PI / a));
-        i = min(i, ARRAY_SIZE(STEPS_HOUR) - 1);
-        steps[0] = &STEPS_HOUR[i];
-    }
-    // Make sure that we don't render more than 15 azimuthal lines.
-    while (steps[0]->n > 24 && theta_range / (M_PI * 2 / steps[0]->n) > 15)
-        steps[0]--;
+    double a;   // Target angle.
+    double azfov, altfov;
+    const int NB_DIVS = 6;
+    const double MAX_SEP = 15 * DD2R;
+
+    get_azalt_fov(painter, frame, &azfov, &altfov);
+
+    // First step can be in degrees of hours.
+    a = azfov / NB_DIVS;
+    a = min(a, MAX_SEP);
+    if (type == 'd')
+        steps[0] = steps_lookup(STEPS_DEG, ARRAY_SIZE(STEPS_DEG), a);
+    else
+        steps[0] = steps_lookup(STEPS_HOUR, ARRAY_SIZE(STEPS_HOUR), a);
+
+    // Second step is always in degrees.
+    a = altfov / NB_DIVS;
+    a = min(a, MAX_SEP);
+    steps[1] = steps_lookup(STEPS_DEG, ARRAY_SIZE(STEPS_DEG), a);
 }
 
 /* Mapping function that render the antimeridian line twice.
@@ -527,7 +685,8 @@ static int render_boundary(const painter_t *painter)
     };
     if (!(painter->proj->flags & PROJ_HAS_DISCONTINUITY))
         return 0;
-    paint_lines(painter, FRAME_VIEW, 4, lines, &map, 64, 0);
+    paint_line(painter, FRAME_VIEW, lines + 0, &map, 64, 0);
+    paint_line(painter, FRAME_VIEW, lines + 2, &map, 64, 0);
     return 0;
 }
 
@@ -538,14 +697,14 @@ static int line_render(const obj_t *obj, const painter_t *painter_)
     double rot[3][3] = MAT3_IDENTITY;
     const step_t *steps[2];
     int splits[2] = {1, 1};
-    double mat[3][3];
+    int pos[2] = {0, 0};
     painter_t painter = *painter_;
 
     // XXX: probably need to use enum id for the different lines/grids.
     if (strcmp(line->obj.id, "ecliptic") == 0) {
-        mat3_rx(M_PI / 2, core->observer->re2i, rot);
+        mat3_copy(core->observer->re2i, rot);
     }
-    if (strcmp(line->obj.id, "equator_line") == 0) {
+    if (strcmp(line->obj.id, "meridian") == 0) {
         mat3_rx(M_PI / 2, rot, rot);
     }
 
@@ -560,94 +719,11 @@ static int line_render(const obj_t *obj, const painter_t *painter_)
     }
 
     // Compute the number of divisions of the grid.
-    if (line->grid) {
-        get_steps(core->fov, line->format, line->frame, &painter, steps);
-    } else {
-        // Lines are the same as a grid with a split of 180° in one direction.
-        steps[0] = &STEPS_DEG[1]; // 180°
-        steps[1] = &STEPS_DEG[4]; //  20°: enough to avoid clipping errors.
-    }
-    mat3_set_identity(mat);
-    render_recursion(line, &painter, rot, 0, splits, mat, steps, 0);
+    get_steps(line->format, line->frame, &painter, steps);
+    render_recursion(line, &painter, rot, 0, splits, pos, steps);
     return 0;
 }
 
-
-// Check if a line interect the normalized viewport.
-// If there is an intersection, `border` will be set with the border index
-// from 0 to 3.
-static double seg_intersect(const double a[2], const double b[2], int *border)
-{
-    // We use the common 'slab' algo for AABB/seg intersection.
-    // With some care to make sure we never use infinite values.
-    double idx, idy,
-           tx1 = -DBL_MAX, tx2 = +DBL_MAX,
-           ty1 = -DBL_MAX, ty2 = +DBL_MAX,
-           txmin = -DBL_MAX, txmax = +DBL_MAX,
-           tymin = -DBL_MAX, tymax = +DBL_MAX,
-           ret = DBL_MAX, vmin, vmax;
-    if (a[0] != b[0]) {
-        idx = 1.0 / (b[0] - a[0]);
-        tx1 = (-1 == a[0] ? -DBL_MAX : (-1 - a[0]) * idx);
-        tx2 = (+1 == a[0] ?  DBL_MAX : (+1 - a[0]) * idx);
-        txmin = min(tx1, tx2);
-        txmax = max(tx1, tx2);
-    }
-    if (a[1] != b[1]) {
-        idy = 1.0 / (b[1] - a[1]);
-        ty1 = (-1 == a[1] ? -DBL_MAX : (-1 - a[1]) * idy);
-        ty2 = (+1 == a[1] ?  DBL_MAX : (+1 - a[1]) * idy);
-        tymin = min(ty1, ty2);
-        tymax = max(ty1, ty2);
-    }
-    ret = DBL_MAX;
-    if (tymin <= txmax && txmin <= tymax) {
-        vmin = max(txmin, tymin);
-        vmax = min(txmax, tymax);
-        if (0.0 <= vmax && vmin <= 1.0) {
-            ret = vmin >= 0 ? vmin : vmax;
-        }
-    }
-    *border = (ret == tx1) ? 0 :
-              (ret == tx2) ? 1 :
-              (ret == ty1) ? 2 :
-                             3;
-
-    return ret;
-}
-
-static void ndc_to_win(const projection_t *proj, const double ndc[2],
-                       double win[2])
-{
-    win[0] = (+ndc[0] + 1) / 2 * proj->window_size[0];
-    win[1] = (-ndc[1] + 1) / 2 * proj->window_size[1];
-}
-
-static bool check_borders(const double a[3], const double b[3],
-                          const projection_t *proj,
-                          double p[2], // Window pos on the border.
-                          double u[2], // Window direction of the line.
-                          double v[2]) // Window Norm of the border.
-{
-    double pos[2][4], q;
-    bool visible[2];
-    int border;
-    const double VS[4][2] = {{+1, 0}, {-1, 0}, {0, -1}, {0, +1}};
-    visible[0] = project(proj, PROJ_TO_NDC_SPACE, a, pos[0]);
-    visible[1] = project(proj, PROJ_TO_NDC_SPACE, b, pos[1]);
-    if (visible[0] != visible[1]) {
-        q = seg_intersect(pos[0], pos[1], &border);
-        if (q == DBL_MAX) return false;
-        vec2_mix(pos[0], pos[1], q, p);
-        ndc_to_win(proj, p, p);
-        ndc_to_win(proj, pos[0], pos[0]);
-        ndc_to_win(proj, pos[1], pos[1]);
-        vec2_sub(pos[1], pos[0], u);
-        vec2_copy(VS[border], v);
-        return true;
-    }
-    return false;
-}
 
 /*
  * Meta class declarations.
